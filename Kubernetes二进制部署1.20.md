@@ -257,6 +257,8 @@ cat > /usr/local/src/kubernetes/ssl/config.json <<EOF
                     "client auth"
                 ]
             }
+        }
+    }
 }
 EOF
 
@@ -448,6 +450,24 @@ cat > /usr/local/src/kubernetes/ssl/k8s/kubernetes-admin-csr.json <<EOF
 }
 EOF
 
+# front-proxy-client证书csr请求文件，CN默认应该与kube-apiserver的--requestheader-allowed-names值相同
+cat > /usr/local/src/kubernetes/ssl/k8s/kubernetes-front-proxy-ca-csr.json <<EOF
+{
+    "CN": "front-proxy-client",
+    "key": {
+        "algo": "rsa",
+        "size": 4096
+    },
+    "names": [
+        {
+            "C": "CN",
+            "ST": "GuangDong",
+            "L": "ShenZhen"
+        }
+    ]
+}
+EOF
+
 
 
 # 创建证书存放目录
@@ -495,9 +515,7 @@ cd /usr/local/src/kubernetes/ssl/k8s
 cfssl gencert -initca kubernetes-ca-csr.json | cfssljson -bare /etc/kubernetes/pki/kubernetes-ca
 
 # 生成kubernetes-front-proxy-ca CA证书
-cfssl gencert \
--initca kubernetes-front-proxy-ca-csr.json \
-| cfssljson -bare /etc/kubernetes/pki/kubernetes-front-proxy-ca
+cfssl gencert -initca kubernetes-front-proxy-ca-csr.json | cfssljson -bare /etc/kubernetes/pki/kubernetes-front-proxy-ca
 
 # 生成kube-apiserver服务端证书,profile指定为server,用于kube-apiserver服务端认证
 cfssl gencert \
@@ -512,7 +530,7 @@ cfssl gencert \
 -ca /etc/kubernetes/pki/kubernetes-ca.pem \
 -ca-key /etc/kubernetes/pki/kubernetes-ca-key.pem \
 -config config.json \
--profile kube-apiserver-kubelet-client \
+-profile client \
 kube-apiserver-kubelet-client-csr.json \
 | cfssljson -bare /etc/kubernetes/pki/kube-apiserver-kubelet-client
 
@@ -521,7 +539,7 @@ cfssl gencert \
 -ca /etc/kubernetes/pki/kubernetes-ca.pem \
 -ca-key /etc/kubernetes/pki/kubernetes-ca-key.pem \
 -config config.json \
--profile kube-controller-manager \
+-profile client \
 kube-controller-manager-csr.json \
 | cfssljson -bare /etc/kubernetes/pki/kube-controller-manager
 
@@ -530,7 +548,7 @@ cfssl gencert \
 -ca /etc/kubernetes/pki/kubernetes-ca.pem \
 -ca-key /etc/kubernetes/pki/kubernetes-ca-key.pem \
 -config config.json \
--profile kube-scheduler \
+-profile client \
 kube-scheduler-csr.json \
 | cfssljson -bare /etc/kubernetes/pki/kube-scheduler
 
@@ -539,7 +557,7 @@ cfssl gencert \
 -ca /etc/kubernetes/pki/kubernetes-ca.pem \
 -ca-key /etc/kubernetes/pki/kubernetes-ca-key.pem \
 -config config.json \
--profile kube-proxy kube-proxy-csr.json \
+-profile client kube-proxy-csr.json \
 | cfssljson -bare /etc/kubernetes/pki/kube-proxy
 
 # 生成kubernetes-admin客户端证书，用于管理kubernetes集群，证书O为system:masters，表示证该用户加入到system:masters组
@@ -547,7 +565,7 @@ cfssl gencert \
 -ca /etc/kubernetes/pki/kubernetes-ca.pem \
 -ca-key /etc/kubernetes/pki/kubernetes-ca-key.pem \
 -config config.json \
--profile kubernetes-admin \
+-profile client \
 kubernetes-admin-csr.json \
 | cfssljson -bare /etc/kubernetes/pki/kubernetes-admin
 
@@ -557,7 +575,7 @@ cfssl gencert \
 -ca /etc/kubernetes/pki/kubernetes-front-proxy-ca.pem \
 -ca-key /etc/kubernetes/pki/kubernetes-front-proxy-ca-key.pem \
 -config config.json \
--profile front-proxy-client \
+-profile client \
 front-proxy-client-csr.json \
 | cfssljson -bare /etc/kubernetes/pki/front-proxy-client
 
@@ -567,7 +585,7 @@ openssl genrsa -out /etc/kubernetes/pki/sa.key 2048
 openssl rsa -in /etc/kubernetes/pki/sa.key -pubout -out /etc/kubernetes/pki/sa.pub
 
 
-# 复制证书到相当节点
+# 复制证书到相关节点
 for i in 2 3; do scp /etc/etcd/pki/* 192.168.8.$i:/etc/etcd/pki ; done
 for i in 2 3; do scp /etc/kubernetes/pki/* 192.168.8.$i:/etc/kubernetes/pki/ ; done
 for i in 4 5; do scp /etc/kubernetes/pki/kube-proxy 192.168.8.$i:/etc/kubernetes/pki/ ; done
@@ -1175,8 +1193,8 @@ stringData:
   description: "TLS引导令牌"
   token-id: \${TOKEN_ID}
   token-secret: \${TOKEN_SECRET}
-  # expiration可选参数，设置token过期时间
-  expiration: $(date -d '+6 hour' -u +"%Y-%m-%dT%H:%M:%SZ")
+  # expiration可选参数，设置token过期时间,时间格式为RFC33399格式2021-03-11T22:35:29+08:00
+  expiration: $(date --rfc-3339=seconds -d "6 hours" | sed 's/ /T/')
   usage-bootstrap-authentication: "true"
   usage-bootstrap-signing: "true"
   #auth-extra-groups: system:bootstrappers:default-node-token
@@ -1192,6 +1210,28 @@ bash create-bootstrap-token.sh
 ### kubelet服务部署
 
 ```shell
+# 生成 kubelet bootstrap-kubeconfig引导文件，注意：这里的${TOKEN_ID}和${BOOTSTRAP_TOKEN}改成上面TLS引导配置部分创建的值
+TOKEN_ID=$(cat bootstrap-secret.yaml | sed -n '/token-id/s#.*: ##p')
+BOOTSTRAP_TOKEN=$(cat bootstrap-secret.yaml | sed -n '/token-secret/s#.*: ##p')
+
+kubectl config set-cluster kubernetes \
+--certificate-authority=/etc/kubernetes/pki/kubernetes-ca.pem \
+--server=https://192.168.8.100:8443 \
+--kubeconfig=/etc/kubernetes/bootstrap-kubeconfig \
+--embed-certs=true
+
+kubectl config set-credentials "system:bootstrap:${TOKEN_ID}" \
+--token=${BOOTSTRAP_TOKEN} \
+--kubeconfig=/etc/kubernetes/bootstrap-kubeconfig
+
+kubectl config set-context default \
+--cluster=kubernetes \
+--user="system:bootstrap:${TOKEN_ID}" \
+--kubeconfig=/etc/kubernetes/bootstrap-kubeconfig
+
+kubectl config use-context default --kubeconfig=/etc/kubernetes/bootstrap-kubeconfig
+
+
 # 创建kubelet配置文件
 cat > /etc/kubernetes/kubelet.conf <<EOF
 KUBELET_ARGS="--config=/etc/kubernetes/kubelet.yaml \
@@ -1226,26 +1266,9 @@ staticPodPath: /etc/kubernetes/manifests
 clusterDomain: cluster.local
 clusterDNS:
 - 10.32.0.10
+maxPods: 110
 EOF
 
-
-# 生成 kubelet bootstrap-kubeconfig引导文件，注意：这里的${TOKEN_ID}和${BOOTSTRAP_TOKEN}改成上面TLS引导配置部分创建的值
-kubectl config set-cluster kubernetes \
---certificate-authority=/etc/kubernetes/pki/kubernetes-ca.pem \
---server=https://192.168.8.100:8443 \
---kubeconfig=/etc/kubernetes/bootstrap-kubeconfig \
---embed-certs=true
-
-kubectl config set-credentials "system:bootstrap:${TOKEN_ID}" \
---token=${BOOTSTRAP_TOKEN} \
---kubeconfig=/etc/kubernetes/bootstrap-kubeconfig
-
-kubectl config set-context default \
---cluster=kubernetes \
---user="system:bootstrap:${TOKEN_ID}" \
---kubeconfig=/etc/kubernetes/bootstrap-kubeconfig
-
-kubectl config use-context default --kubeconfig=/etc/kubernetes/bootstrap-kubeconfig
 
 # 创建kubelet的systemd配置
 cat > /usr/lib/systemd/system/kubelet.service <<EOF
@@ -1439,36 +1462,42 @@ kubectl top pods -A
 
 ```shell
 # 安装Dashboad
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.2.0/aio/deploy/recommended.yaml
+curl https://raw.githubusercontent.com/kubernetes/dashboard/v2.2.0/aio/deploy/recommended.yaml -o kubernetes-dashboad.yaml
+kubectl apply -f kubernetes-dashboad.yaml
 
 # Dashboad登录认证
-# 授予ServicAccout kubernetes-dashboard管理员权限，注意：生产环境谨慎使用管理员权限，建议授权特定某个名称空间权限
+# 创建ServiceAccout dashboard-admin授予ServicAccout dashboard-admin管理员权限，注意：生产环境谨慎使用管理员权限，建议授权特定某个名称空间权限
 cat << EOF >> dashboard-admin.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: kubernetes-dashboard
+  name: dashboard-admin
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kubernetes-dashboard
-  namespace: kubernetes-dashboard
+  name: dashboard-admin
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: cluster-admin
 subjects:
-  - kind: ServiceAccount
-    name: kubernetes-dashboard
+  - name: dashboard-admin
+    kind: ServiceAccount
     namespace: kubernetes-dashboard
 EOF
-# 注意：v2.2.0版本默认已经创建了名为kubernetes-dashboard的clusterrolebinding，并授权的是kubernetes-dashboard的clusterrole权限，所以可以先删除掉名为kubernetes-dashboard的clusterrolebinding，或者修改一下上面创建的clusterrolebinding的名称
+
 kubectl apply -f dashboard-admin.yaml
 
 
 # Token方式，在Dashboad UI将选择Token登录方式，然后将打印出的token在Dashboad UI中填入登录
-SECRET=$(kubectl get sa -n kubernetes-dashboard kubernetes-dashboard -o jsonpath={.secrets[0].name})
+SECRET=$(kubectl get sa -n kubernetes-dashboard dashboard-admin -o jsonpath={.secrets[0].name})
 kubectl get secret ${SECRET} -n kubernetes-dashboard -o jsonpath={.data.token} | base64 -d	# 将打印出的token在Dashboad UI使用登录
 
 
 # kubeconfig方式，在Dashboad UI将选择Kubeconfig登录方式，然后选择下面生成的kubeconfig
-SECRET=$(kubectl get sa -n kubernetes-dashboard kubernetes-dashboard -o jsonpath={.secrets[0].name})
+SECRET=$(kubectl get sa -n dashboard-admin kubernetes-dashboard -o jsonpath={.secrets[0].name})
 TOKEN=$(kubectl get secret ${SECRET} -n kubernetes-dashboard -o jsonpath={.data.token} | base64 -d)
 
 kubectl config set-cluster kubernetes \
