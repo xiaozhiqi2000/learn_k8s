@@ -1446,7 +1446,7 @@ Address 1: 10.32.0.1 kubernetes.default.svc.cluster.local
 curl -L https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.4.2/components.yaml -o metrics-server.yaml
 # 跳过kubelet服务端TLS认证，在kubelet没有启用服务端验证的情况会不修改metrics-server会启动不起来，可以不修改的情况下查看日志可以发现
 sed -i '/secure-port/a\        - --kubelet-insecure-tls' metrics-server.yaml
-kubectl apply -f metrics-server
+kubectl apply -f metrics-server.yaml
 
 # 查看运行状态
 kubectl get pods -l k8s-app=metrics-server -n kube-system
@@ -1467,7 +1467,7 @@ kubectl apply -f kubernetes-dashboad.yaml
 
 # Dashboad登录认证
 # 创建ServiceAccout dashboard-admin授予ServicAccout dashboard-admin管理员权限，注意：生产环境谨慎使用管理员权限，建议授权特定某个名称空间权限
-cat << EOF >> dashboard-admin.yaml
+cat > dashboard-admin.yaml << EOF 
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -1490,14 +1490,13 @@ EOF
 
 kubectl apply -f dashboard-admin.yaml
 
-
 # Token方式，在Dashboad UI将选择Token登录方式，然后将打印出的token在Dashboad UI中填入登录
 SECRET=$(kubectl get sa -n kubernetes-dashboard dashboard-admin -o jsonpath={.secrets[0].name})
 kubectl get secret ${SECRET} -n kubernetes-dashboard -o jsonpath={.data.token} | base64 -d	# 将打印出的token在Dashboad UI使用登录
 
 
 # kubeconfig方式，在Dashboad UI将选择Kubeconfig登录方式，然后选择下面生成的kubeconfig
-SECRET=$(kubectl get sa -n dashboard-admin kubernetes-dashboard -o jsonpath={.secrets[0].name})
+SECRET=$(kubectl get sa -n kubernetes-dashboard dashboard-admin -o jsonpath={.secrets[0].name})
 TOKEN=$(kubectl get secret ${SECRET} -n kubernetes-dashboard -o jsonpath={.data.token} | base64 -d)
 
 kubectl config set-cluster kubernetes \
